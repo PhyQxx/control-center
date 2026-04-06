@@ -5,7 +5,7 @@ const fs = require('fs');
 const app = express();
 const PORT = process.env.PORT || 3000;
 const GATEWAY_TOKEN = '841f529e7dcf20d7528b40fb159226dc86ace43f45603ce6';
-const GATEWAY_URL = 'http://localhost:18789';
+const GATEWAY_URL = 'http://host.docker.internal:18789';
 
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'dist')));
@@ -32,31 +32,233 @@ const AGENT_META = {
   xiaoai:  { emoji: '🤵', color: '#FFA657' },
 };
 
-// In-memory alert store (v1.2) — replace with DB/persistence in production
+// ─── Execution Chains Store (Phase 2) ───────────────────────────────────────
+let chains = [];
+let chainCounter = 1;
+
+// ─── Sessions Send Helper (Phase 2) ───────────────────────────────────────
+async function sessions_send(agentId, message, timeout = 300) {
+  try {
+    const res = await fetch(`${GATEWAY_URL}/tools/invoke`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${GATEWAY_TOKEN}` },
+      body: JSON.stringify({
+        tool: 'sessions_send',
+        action: 'json',
+        args: { agentId, message, timeout }
+      })
+    });
+    const data = await res.json();
+    return data;
+  } catch (e) {
+    console.error('sessions_send error:', e.message);
+    return { error: e.message };
+  }
+}
+
+// ─── Result Parser (Phase 2) ───────────────────────────────────────────────
+function parseExecutionResult(content) {
+  // Pattern: 【执行结果】任务ID: HT-xxx | 状态: success/failed | 结果摘要: ...
+  const pattern = /【执行结果】任务ID:\s*(HT-\d+)\s*\|\s*状态:\s*(success|failed)\s*\|\s*结果摘要:\s*(.+?)(?:\s*\|\s*详情:\s*(.+))?$/i;
+  const match = content.match(pattern);
+  if (match) {
+    return {
+      taskId: match[1],
+      status: match[2] === 'success' ? 'completed' : 'failed',
+      summary: match[3],
+      detail: match[4] || '',
+    };
+  }
+  return null;
+}
+
+// ─── In-memory alert store (v1.2)
 let alerts = [
   { id: 'a1', agentId: 'dev', type: 'context_pressure', level: 'critical', message: 'Context Pressure 超过 90%', value: 92, threshold: 85, status: 'active', createdAt: new Date(Date.now() - 120000).toISOString() },
   { id: 'a2', agentId: 'qa',  type: 'context_pressure', level: 'warning',  message: 'Context Pressure 超过 80%', value: 84, threshold: 85, status: 'active', createdAt: new Date(Date.now() - 300000).toISOString() },
   { id: 'a3', agentId: 'pm',  type: 'agent_error',     level: 'warning',  message: 'Agent 异常退出',              value: 1,  threshold: null, status: 'resolved', createdAt: new Date(Date.now() - 600000).toISOString(), resolvedAt: new Date(Date.now() - 300000).toISOString() },
 ];
 
-// In-memory team members store (v1.2)
+// In-memory team members store (v1.2+)
 let teamMembers = [
-  { agentId: 'pd',       name: 'PD (项目总监)',      role: 'admin',  status: 'active', contextPressure: 45, memoryCount: 45 },
-  { agentId: 'pm',       name: 'PM (产品经理)',      role: 'member', status: 'active', contextPressure: 38, memoryCount: 38 },
-  { agentId: 'dev',      name: 'Dev (开发工程师)',   role: 'member', status: 'active', contextPressure: 92, memoryCount: 52 },
-  { agentId: 'dev-dq',   name: 'Dev-DQ (开发)',      role: 'member', status: 'idle',  contextPressure: 28, memoryCount: 28 },
-  { agentId: 'des',      name: 'Des (UI/UX设计)',   role: 'member', status: 'active', contextPressure: 33, memoryCount: 33 },
-  { agentId: 'qa',       name: 'QA (测试工程师)',   role: 'member', status: 'active', contextPressure: 84, memoryCount: 19 },
-  { agentId: 'ops',      name: 'Ops (运维工程师)',  role: 'member', status: 'idle',  contextPressure: 14, memoryCount: 14 },
-  { agentId: 'xiaoai',   name: '小爱 (助理)',        role: 'admin',  status: 'active', contextPressure: 61, memoryCount: 61 },
+  { agentId: 'pd',       name: 'PD (项目总监)',      role: 'admin',  status: 'active', contextPressure: 45, memoryCount: 45, feishuAppId: '', feishuAppSecret: '' },
+  { agentId: 'pm',       name: 'PM (产品经理)',      role: 'member', status: 'active', contextPressure: 38, memoryCount: 38, feishuAppId: '', feishuAppSecret: '' },
+  { agentId: 'dev',      name: 'Dev (开发工程师)',   role: 'member', status: 'active', contextPressure: 92, memoryCount: 52, feishuAppId: '', feishuAppSecret: '' },
+  { agentId: 'dev-dq',   name: 'Dev-DQ (开发)',      role: 'member', status: 'idle',  contextPressure: 28, memoryCount: 28, feishuAppId: '', feishuAppSecret: '' },
+  { agentId: 'des',      name: 'Des (UI/UX设计)',   role: 'member', status: 'active', contextPressure: 33, memoryCount: 33, feishuAppId: '', feishuAppSecret: '' },
+  { agentId: 'qa',       name: 'QA (测试工程师)',   role: 'member', status: 'active', contextPressure: 84, memoryCount: 19, feishuAppId: '', feishuAppSecret: '' },
+  { agentId: 'ops',      name: 'Ops (运维工程师)',  role: 'member', status: 'idle',  contextPressure: 14, memoryCount: 14, feishuAppId: '', feishuAppSecret: '' },
+  { agentId: 'xiaoai',   name: '小爱 (助理)',        role: 'admin',  status: 'active', contextPressure: 61, memoryCount: 61, feishuAppId: '', feishuAppSecret: '' },
 ];
 
 // Threshold config (v1.2)
 let thresholdConfig = {
   contextPressureThreshold: 85,
   feishuWebhookEnabled: true,
+  feishuWebhookUrl: 'https://open.feishu.cn/open-apis/bot/v2/hook/ae03114d-aa0d-4348-b12e-9bd7e2911399',
   emailEnabled: false,
+  // Alert suppression: don't re-alert same agent+type within 5 minutes
+  alertCooldownMs: 5 * 60 * 1000,
 };
+
+// ─── Hall (Phase 1) In-Memory Stores ───────────────────────────────────────
+let hallMessages = [
+  {
+    id: 'msg-001',
+    senderId: 'pm',
+    senderName: 'PM',
+    senderEmoji: '📋',
+    content: '大家好，Hall 协作大厅已上线！可以用 @ 指派任务给特定 Agent 👋',
+    timestamp: new Date(Date.now() - 3600000 * 2).toISOString(),
+    isTask: false,
+  },
+  {
+    id: 'msg-002',
+    senderId: 'dev',
+    senderName: 'Dev',
+    senderEmoji: '💻',
+    content: '@PM Hall UI 设计稿什么时候能出？我这边等着开始开发',
+    timestamp: new Date(Date.now() - 3600000).toISOString(),
+    isTask: false,
+  },
+  {
+    id: 'task-001',
+    senderId: 'pm',
+    senderName: 'PM',
+    senderEmoji: '📋',
+    content: '@Des 请开始 Hall UI 设计初稿',
+    timestamp: new Date(Date.now() - 3500000).toISOString(),
+    isTask: true,
+    task: {
+      id: 'HT-001',
+      title: 'Hall UI 设计初稿',
+      description: '完成 Hall 协作大厅的 UI 设计初稿，包括布局、消息流、任务卡片样式',
+      assignee: 'des',
+      assigneeName: 'Des',
+      assigner: 'pm',
+      status: 'pending',
+      createdAt: new Date(Date.now() - 3500000).toISOString(),
+      acceptedAt: null,
+      completedAt: null,
+      result: '',
+    },
+  },
+  {
+    id: 'msg-003',
+    senderId: 'des',
+    senderName: 'Des',
+    senderEmoji: '🎨',
+    content: '收到！设计稿今天下午可以出初稿 😊',
+    timestamp: new Date(Date.now() - 3000000).toISOString(),
+    isTask: false,
+  },
+  {
+    id: 'msg-004',
+    senderId: 'pd',
+    senderName: 'PD',
+    senderEmoji: '👔',
+    content: '@Dev @QA 控制台 v1.3 已部署，麻烦验证一下功能是否正常',
+    timestamp: new Date(Date.now() - 1200000).toISOString(),
+    isTask: false,
+  },
+  {
+    id: 'task-002',
+    senderId: 'pd',
+    senderName: 'PD',
+    senderEmoji: '👔',
+    content: '@Dev 控制台 v1.3 功能验证',
+    timestamp: new Date(Date.now() - 1150000).toISOString(),
+    isTask: true,
+    task: {
+      id: 'HT-002',
+      title: '控制台 v1.3 功能验证',
+      description: '验证控制台 v1.3 部署后各 Tab 功能是否正常，包括仪表盘、员工总览、告警中心、任务看板',
+      assignee: 'dev',
+      assigneeName: 'Dev',
+      assigner: 'pd',
+      status: 'accepted',
+      createdAt: new Date(Date.now() - 1150000).toISOString(),
+      acceptedAt: new Date(Date.now() - 1000000).toISOString(),
+      completedAt: null,
+      result: '',
+    },
+  },
+  {
+    id: 'task-003',
+    senderId: 'pd',
+    senderName: 'PD',
+    senderEmoji: '👔',
+    content: '@QA 同步验证 AI 笔记功能',
+    timestamp: new Date(Date.now() - 1100000).toISOString(),
+    isTask: true,
+    task: {
+      id: 'HT-003',
+      title: 'AI 笔记功能验证',
+      description: '验证 AI 笔记前端和后端是否正常工作，包括新建笔记、AI 对话功能',
+      assignee: 'qa',
+      assigneeName: 'QA',
+      assigner: 'pd',
+      status: 'pending',
+      createdAt: new Date(Date.now() - 1100000).toISOString(),
+      acceptedAt: null,
+      completedAt: null,
+      result: '',
+    },
+  },
+];
+
+let hallTasks = [
+  {
+    id: 'HT-001',
+    title: 'Hall UI 设计初稿',
+    description: '完成 Hall 协作大厅的 UI 设计初稿，包括布局、消息流、任务卡片样式',
+    assignee: 'des',
+    assigneeName: 'Des',
+    assigner: 'pm',
+    status: 'pending',
+    createdAt: new Date(Date.now() - 3500000).toISOString(),
+    acceptedAt: null,
+    completedAt: null,
+    result: '',
+  },
+  {
+    id: 'HT-002',
+    title: '控制台 v1.3 功能验证',
+    description: '验证控制台 v1.3 部署后各 Tab 功能是否正常',
+    assignee: 'dev',
+    assigneeName: 'Dev',
+    assigner: 'pd',
+    status: 'accepted',
+    createdAt: new Date(Date.now() - 1150000).toISOString(),
+    acceptedAt: new Date(Date.now() - 1000000).toISOString(),
+    completedAt: null,
+    result: '',
+  },
+  {
+    id: 'HT-003',
+    title: 'AI 笔记功能验证',
+    description: '验证 AI 笔记前端和后端是否正常工作',
+    assignee: 'qa',
+    assigneeName: 'QA',
+    assigner: 'pd',
+    status: 'pending',
+    createdAt: new Date(Date.now() - 1100000).toISOString(),
+    acceptedAt: null,
+    completedAt: null,
+    result: '',
+  },
+];
+
+let hallAgents = [
+  { id: 'pd',      name: 'PD',      emoji: '👔', color: '#DB61A2', status: 'idle',    role: '项目总监' },
+  { id: 'pm',      name: 'PM',      emoji: '📋', color: '#1F6FEB', status: 'idle',    role: '产品经理' },
+  { id: 'dev',     name: 'Dev',     emoji: '💻', color: '#8957E5', status: 'running', role: '开发工程师' },
+  { id: 'dev-dq',  name: '窦青',    emoji: '🛠', color: '#DA3633', status: 'idle',    role: '开发工程师' },
+  { id: 'des',     name: 'Des',     emoji: '🎨', color: '#2EA043', status: 'running', role: 'UI/UX设计师' },
+  { id: 'qa',      name: 'QA',      emoji: '🧪', color: '#238636', status: 'idle',    role: '测试工程师' },
+  { id: 'ops',     name: 'Ops',     emoji: '🔧', color: '#D29922', status: 'offline', role: '运维工程师' },
+  { id: 'xiaoai',  name: '小爱',   emoji: '🤵', color: '#FFA657', status: 'idle',    role: '秘书' },
+];
 
 function safeRead(filePath) {
   try { if (fs.existsSync(filePath)) return fs.readFileSync(filePath, 'utf8'); } catch {}
@@ -196,7 +398,7 @@ app.get('/api/gateway-data', async (req, res) => {
   else if (runningCount === 0) { healthScore = 50; healthLevel = 'degraded'; }
 
   const connections = [
-    { name: 'Gateway', icon: '🔗', status: gatewayOnline ? 'good' : 'bad', detail: gatewayOnline ? 'localhost:18789' : '无法连接' },
+    { name: 'Gateway', icon: '🔗', status: gatewayOnline ? 'good' : 'bad', detail: 'localhost:18789' },
     { name: 'Sessions', icon: '💬', status: allSessions.length > 0 ? 'good' : 'warn', detail: `${allSessions.length} 活跃会话` },
     { name: 'Memory', icon: '🧠', status: 'warn', detail: '需连接 Memory API' },
     { name: 'Feishu', icon: '📨', status: 'warn', detail: '未配置 Webhook' },
@@ -218,13 +420,166 @@ app.get('/api/gateway-data', async (req, res) => {
   });
 });
 
+// ─── v1.2 Background Alert Monitor ─────────────────────────────────────────
+// Tracks last alert time per agent+type to implement 5-minute suppression
+const lastAlertTime = {}; // key: "${agentId}:${type}", value: timestamp
+
+// Fetch fresh gateway data (same logic as /api/gateway-data but reusable)
+async function fetchGatewayDataForAlerts() {
+  let gatewayOnline = false;
+  let allSessions = [];
+  let agentMap = {};
+
+  try {
+    const healthRes = await fetch(`${GATEWAY_URL}/health`);
+    const health = await healthRes.json();
+    gatewayOnline = health.status === 'live';
+  } catch {}
+
+  if (!gatewayOnline) return { gatewayOnline, agents: [] };
+
+  try {
+    const sessionsRes = await fetch(`${GATEWAY_URL}/tools/invoke`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${GATEWAY_TOKEN}` },
+      body: JSON.stringify({ tool: 'sessions_list', action: 'json', args: { limit: 100, messageLimit: 0 } })
+    });
+    const sessionsData = await sessionsRes.json();
+    if (sessionsData?.result?.details?.sessions) {
+      allSessions = sessionsData.result.details.sessions;
+    }
+  } catch {}
+
+  const allAgentIds = Object.keys(AGENT_WORKSPACES);
+  for (const id of allAgentIds) {
+    agentMap[id] = { agentId: id, contextPressure: 0, pressureLevel: 'low', status: 'idle' };
+  }
+
+  for (const s of allSessions) {
+    const key = s.key || '';
+    let parentAgent = null;
+    if (key.includes(':subagent:')) {
+      const parts = key.split(':');
+      parentAgent = parts[1] || 'unknown';
+    } else {
+      const match = key.match(/^agent:([^:]+):/);
+      parentAgent = match ? match[1] : (s.agentId || 'unknown');
+    }
+    if (!parentAgent || !agentMap[parentAgent]) parentAgent = 'unknown';
+    if (!agentMap[parentAgent]) {
+      agentMap[parentAgent] = { agentId: parentAgent, contextPressure: 0, pressureLevel: 'low', status: 'idle' };
+    }
+    const a = agentMap[parentAgent];
+    if (s.status === 'running' || s.status === 'active') a.status = 'running';
+    a.tokenCount = s.tokenCount || 0;
+    a.tokenLimit = s.tokenLimit || 200000;
+    if (a.tokenLimit > 0) {
+      a.contextPressure = Math.min(100, Math.round((a.tokenCount / a.tokenLimit) * 100));
+    }
+    if (a.contextPressure >= 85) a.pressureLevel = 'high';
+    else if (a.contextPressure >= 60) a.pressureLevel = 'med';
+    else a.pressureLevel = 'low';
+  }
+
+  return { gatewayOnline, agents: Object.values(agentMap) };
+}
+
+function sendFeishuAlert(title, content) {
+  const webhookUrl = thresholdConfig.feishuWebhookUrl;
+  if (!webhookUrl || !thresholdConfig.feishuWebhookEnabled) return;
+  fetch(webhookUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      msg_type: 'interactive',
+      card: {
+        config: { wide_screen_mode: true },
+        header: { title: { tag: 'plain_text', content: title }, template: 'red' },
+        elements: [{ tag: 'markdown', content }],
+      }
+    })
+  }).catch(err => console.error('[AlertMonitor] Feishu send failed:', err.message));
+}
+
+function checkAndFireAlerts() {
+  const threshold = thresholdConfig.contextPressureThreshold;
+  const cooldown = thresholdConfig.alertCooldownMs || 5 * 60 * 1000;
+  const now = Date.now();
+
+  fetchGatewayDataForAlerts().then(({ gatewayOnline, agents }) => {
+    if (!gatewayOnline) {
+      const key = 'gateway:offline';
+      if (!lastAlertTime[key] || (now - lastAlertTime[key]) > cooldown) {
+        lastAlertTime[key] = now;
+        addAlert({ agentId: 'Gateway', type: 'gateway_offline', level: 'critical',
+          message: 'Gateway 连接失败，OpenClaw 服务异常', value: 0, threshold: null });
+        sendFeishuAlert('🔴 [控制台告警] Gateway 离线',
+          `**告警类型：** Gateway 离线\n**时间：** ${new Date().toLocaleString('zh-CN')}\n**操作：** 点击查看 → http://192.168.31.104:8095`);
+      }
+      return;
+    }
+
+    for (const a of agents) {
+      // Context Pressure alert
+      if (a.contextPressure >= threshold) {
+        const key = `${a.agentId}:context_pressure`;
+        if (!lastAlertTime[key] || (now - lastAlertTime[key]) > cooldown) {
+          lastAlertTime[key] = now;
+          const level = a.contextPressure >= 90 ? 'critical' : 'warning';
+          const agentMeta = AGENT_META[a.agentId] || {};
+          const agentName = agentMeta.emoji + ' ' + a.agentId;
+          addAlert({ agentId: a.agentId, type: 'context_pressure', level,
+            message: `${agentName} Context Pressure 达到 ${a.contextPressure}%，超过阈值 ${threshold}%`,
+            value: a.contextPressure, threshold });
+          sendFeishuAlert(`🔴 [控制台告警] ${a.agentId} Context Pressure 超阈值`,
+            `**告警类型：** Context Pressure 超阈值\n**Agent：** ${a.agentId}\n**当前值：** ${a.contextPressure}%（阈值：${threshold}%）\n**时间：** ${new Date().toLocaleString('zh-CN')}\n**操作：** 点击查看 → http://192.168.31.104:8095`);
+        }
+      }
+      // Error/offline status alert
+      if (a.status === 'error' || a.status === 'offline') {
+        const key = `${a.agentId}:agent_error`;
+        if (!lastAlertTime[key] || (now - lastAlertTime[key]) > cooldown) {
+          lastAlertTime[key] = now;
+          addAlert({ agentId: a.agentId, type: 'agent_error', level: 'critical',
+            message: `${a.agentId} Agent 进入 ${a.status === 'error' ? '异常' : '离线'} 状态`, value: 1, threshold: null });
+          sendFeishuAlert(`🔴 [控制台告警] ${a.agentId} Agent 异常`,
+            `**告警类型：** Agent ${a.status === 'error' ? '异常' : '离线'}\n**Agent：** ${a.agentId}\n**时间：** ${new Date().toLocaleString('zh-CN')}\n**操作：** 点击查看 → http://192.168.31.104:8095`);
+        }
+      }
+    }
+  }).catch(err => console.error('[AlertMonitor] Error:', err.message));
+}
+
+function addAlert({ agentId, type, level, message, value, threshold }) {
+  // Avoid duplicates in the in-memory store
+  const existing = alerts.find(a => a.agentId === agentId && a.type === type && a.status === 'active');
+  if (existing) return;
+  const alert = {
+    id: 'a' + Date.now() + Math.floor(Math.random() * 1000),
+    agentId, type, level, message, value, threshold: threshold || null,
+    status: 'active',
+    createdAt: new Date().toISOString(),
+  };
+  alerts.unshift(alert);
+  // Keep max 200 alerts in memory
+  if (alerts.length > 200) alerts.splice(200);
+}
+
+// Start alert monitor: check every 30 seconds
+setInterval(checkAndFireAlerts, 30 * 1000);
+// Run once on startup (with small delay to let server start)
+setTimeout(checkAndFireAlerts, 5000);
+
 // ─── v1.2 Alert Endpoints ──────────────────────────────────────────────────
 
 // GET /api/alerts — list all alerts
 app.get('/api/alerts', (req, res) => {
-  const { status } = req.query;
+  const { status, severity } = req.query;
   let result = alerts;
   if (status) result = result.filter(a => a.status === status);
+  if (severity) result = result.filter(a => a.level === severity); // severity param -> level field
+  // Normalize: add severity field to each alert for frontend compatibility
+  result = result.map(a => ({ ...a, severity: a.level }));
   res.json({ ok: true, alerts: result, total: result.length });
 });
 
@@ -261,18 +616,20 @@ app.get('/api/alerts/config', (req, res) => {
 
 // PUT /api/alerts/config — update threshold config
 app.put('/api/alerts/config', (req, res) => {
-  const { contextPressureThreshold, feishuWebhookEnabled, emailEnabled } = req.body;
+  const { contextPressureThreshold, feishuWebhookEnabled, feishuWebhookUrl, emailEnabled } = req.body;
   if (contextPressureThreshold !== undefined) thresholdConfig.contextPressureThreshold = contextPressureThreshold;
   if (feishuWebhookEnabled !== undefined) thresholdConfig.feishuWebhookEnabled = feishuWebhookEnabled;
+  if (feishuWebhookUrl !== undefined) thresholdConfig.feishuWebhookUrl = feishuWebhookUrl;
   if (emailEnabled !== undefined) thresholdConfig.emailEnabled = emailEnabled;
   res.json({ ok: true, config: thresholdConfig });
 });
 
 // POST /api/alerts/test-feishu — test Feishu webhook
-const FEISHU_WEBHOOK = 'https://open.feishu.cn/open-apis/bot/v2/hook/ae03114d-aa0d-4348-b12e-9bd7e2911399';
 app.post('/api/alerts/test-feishu', async (req, res) => {
+  const webhookUrl = thresholdConfig.feishuWebhookUrl;
+  if (!webhookUrl) return res.json({ ok: false, error: '飞书 Webhook URL 未配置，请在告警配置中填写' });
   try {
-    const response = await fetch(FEISHU_WEBHOOK, {
+    const response = await fetch(webhookUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ msg_type: 'text', content: { text: '🔔 控制台飞书机器人连接正常 ✅' } })
@@ -290,7 +647,21 @@ app.post('/api/alerts/test-feishu', async (req, res) => {
 
 // ─── v1.2 Batch Operation Endpoints ───────────────────────────────────────
 
-// POST /api/agents/batch — batch operation on multiple agents
+// Helper: call OpenClaw Gateway sessions tool
+async function gatewaySessionsOp(tool, action, args) {
+  try {
+    const res = await fetch(`${GATEWAY_URL}/tools/invoke`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${GATEWAY_TOKEN}` },
+      body: JSON.stringify({ tool, action, args })
+    });
+    return await res.json();
+  } catch (e) {
+    return { error: e.message };
+  }
+}
+
+// POST /api/agents/batch — batch operation on multiple agents (real OpenClaw API)
 app.post('/api/agents/batch', async (req, res) => {
   const { agentIds, action } = req.body;
   if (!agentIds || !Array.isArray(agentIds) || agentIds.length === 0) {
@@ -300,25 +671,99 @@ app.post('/api/agents/batch', async (req, res) => {
     return res.status(400).json({ ok: false, error: 'action must be: start, stop, or restart' });
   }
 
-  const results = { success: [], failed: [] };
+  const success = [];
+  const failed = [];
+
+  // Step 1: for each agent, find its active session key (if stop/restart)
+  // Step 2: call sessions_kill (stop) or sessions_spawn (start)
   for (const agentId of agentIds) {
     const wsPath = AGENT_WORKSPACES[agentId];
     if (!wsPath) {
-      results.failed.push({ agentId, reason: 'Agent not found' });
+      failed.push({ agentId, reason: 'Agent 未注册（无工作区路径）' });
       continue;
     }
-    // Simulate operation — in production this calls Gateway API
-    results.success.push({ agentId, action });
+
+    try {
+      if (action === 'stop' || action === 'restart') {
+        // Find running session for this agent
+        const listResult = await gatewaySessionsOp('sessions_list', 'json', {
+          limit: 100, messageLimit: 0,
+          filter: { agentIds: [agentId] }
+        });
+        const sessions = listResult?.result?.details?.sessions || [];
+        const runningSessions = sessions.filter(s =>
+          s.status === 'running' || s.status === 'active'
+        );
+
+        for (const sess of runningSessions) {
+          await gatewaySessionsOp('sessions_kill', 'json', { sessionKey: sess.key });
+        }
+      }
+
+      if (action === 'start' || action === 'restart') {
+        // Spawn new session for this agent
+        const spawnResult = await gatewaySessionsOp('sessions_spawn', 'json', {
+          agentId,
+          mode: 'session',
+          task: `启动 Agent ${agentId}，请等待指令。`,
+        });
+        if (spawnResult?.error) {
+          failed.push({ agentId, reason: '启动失败: ' + JSON.stringify(spawnResult.error) });
+          continue;
+        }
+      }
+
+      success.push({ agentId, action });
+    } catch (e) {
+      failed.push({ agentId, reason: '操作异常: ' + e.message });
+    }
   }
 
+  const opLabel = { start: '启动', stop: '停止', restart: '重启' }[action];
   res.json({
     ok: true,
-    summary: `批量${action === 'start' ? '启动' : action === 'stop' ? '停止' : '重启'}完成：${results.success.length} 个成功，${results.failed.length} 个失败`,
-    results,
+    summary: `批量${opLabel}完成：${success.length} 个成功，${failed.length} 个失败`,
+    results: { success, failed },
   });
 });
 
 // ─── v1.2 Team Management Endpoints ───────────────────────────────────────
+
+// Helper: sync team members to AGENTS.md in all workspaces
+function syncAgentsMd() {
+  for (const [agentId, wsPath] of Object.entries(AGENT_WORKSPACES)) {
+    const filePath = path.join(wsPath, 'AGENTS.md');
+    try {
+      let content = '';
+      if (fs.existsSync(filePath)) {
+        content = fs.readFileSync(filePath, 'utf8');
+      } else {
+        content = '# AGENTS.md\n';
+      }
+      // Remove existing entries for agents that are no longer in teamMembers
+      const activeIds = teamMembers.map(m => m.agentId);
+      // Filter out lines that start with existing agent entries
+      const lines = content.split('\n').filter(line => {
+        for (const id of activeIds) {
+          if (line.includes(`agentId: ${id}`) || line.includes(`agentId:${id}`)) return false;
+        }
+        return true;
+      });
+      // Append current team members to the file
+      const header = lines[0] || '# AGENTS.md';
+      const rest = lines.slice(1).join('\n').trim();
+      let newContent = header + '\n';
+      for (const m of teamMembers) {
+        const emoji = AGENT_META[m.agentId]?.emoji || '🤖';
+        newContent += `- **${m.name}** (${m.role}) | agentId: ${m.agentId}\n`;
+      }
+      if (rest) newContent += '\n' + rest + '\n';
+      fs.writeFileSync(filePath, newContent, 'utf8');
+    } catch (e) {
+      console.error(`[Team] Failed to sync AGENTS.md for ${agentId}:`, e.message);
+    }
+  }
+}
 
 // GET /api/team/members — list all team members
 app.get('/api/team/members', (req, res) => {
@@ -332,19 +777,23 @@ app.post('/api/team/members', (req, res) => {
   if (teamMembers.find(m => m.agentId === agentId)) {
     return res.status(409).json({ ok: false, error: 'Agent ID already exists' });
   }
-  const member = { agentId, name, role: role || 'member', status: status || 'idle', contextPressure: 0, memoryCount: 0 };
+  const member = { agentId, name, role: role || 'member', status: status || 'idle', contextPressure: 0, memoryCount: 0, feishuAppId: '', feishuAppSecret: '' };
   teamMembers.push(member);
+  syncAgentsMd(); // Persist to AGENTS.md
   res.json({ ok: true, member });
 });
 
-// PUT /api/team/members/:agentId — update a team member
+// PUT /api/team/members/:agentId — update a team member (v1.3 includes feishu)
 app.put('/api/team/members/:agentId', (req, res) => {
   const member = teamMembers.find(m => m.agentId === req.params.agentId);
   if (!member) return res.status(404).json({ ok: false, error: 'Team member not found' });
-  const { name, role, status } = req.body;
+  const { name, role, status, feishuAppId, feishuAppSecret } = req.body;
   if (name !== undefined) member.name = name;
   if (role !== undefined) member.role = role;
   if (status !== undefined) member.status = status;
+  if (feishuAppId !== undefined) member.feishuAppId = feishuAppId;
+  if (feishuAppSecret !== undefined) member.feishuAppSecret = feishuAppSecret;
+  syncAgentsMd(); // Persist to AGENTS.md
   res.json({ ok: true, member });
 });
 
@@ -353,7 +802,1066 @@ app.delete('/api/team/members/:agentId', (req, res) => {
   const idx = teamMembers.findIndex(m => m.agentId === req.params.agentId);
   if (idx === -1) return res.status(404).json({ ok: false, error: 'Team member not found' });
   const removed = teamMembers.splice(idx, 1)[0];
+  syncAgentsMd(); // Persist to AGENTS.md
   res.json({ ok: true, removed });
+});
+
+// ─── Hall Phase 1 Endpoints ──────────────────────────────────────────────
+
+// GET /api/hall/messages — get all hall messages (supports topicId, page, pageSize)
+app.get('/api/hall/messages', (req, res) => {
+  const { topicId, page = 1, pageSize = 20 } = req.query;
+
+  let msgs = hallMessages;
+  if (topicId) {
+    msgs = msgs.filter(m => m.topicId === topicId);
+  }
+
+  // Sort by timestamp descending
+  msgs = [...msgs].sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+
+  const total = msgs.length;
+  const p = parseInt(page);
+  const ps = parseInt(pageSize);
+  const start = (p - 1) * ps;
+  const paginatedMsgs = msgs.slice(start, start + ps);
+
+  res.json({
+    ok: true,
+    messages: paginatedMsgs,
+    pagination: {
+      page: p,
+      pageSize: ps,
+      total,
+      totalPages: Math.ceil(total / ps),
+      hasMore: start + ps < total,
+    },
+  });
+});
+
+// POST /api/hall/messages — send a message (supports @agentId syntax, topicId)
+app.post('/api/hall/messages', (req, res) => {
+  const { senderId, senderName, senderEmoji, content, topicId } = req.body;
+  if (!senderId || !content) {
+    return res.status(400).json({ ok: false, error: 'senderId and content are required' });
+  }
+
+  // Parse @ mentions
+  const atMentionRegex = /@([a-zA-Z0-9_-]+)/g;
+  const mentions = [];
+  let match;
+  while ((match = atMentionRegex.exec(content)) !== null) {
+    const agentId = match[1].toLowerCase();
+    const agent = hallAgents.find(a => a.id === agentId);
+    if (agent) {
+      mentions.push({ agentId: agent.id, agentName: agent.name });
+    }
+  }
+
+  const messageId = 'msg-' + Date.now();
+  const timestamp = new Date().toISOString();
+
+  // Create the base message
+  const message = {
+    id: messageId,
+    senderId,
+    senderName: senderName || senderId,
+    senderEmoji: senderEmoji || '🤖',
+    content,
+    timestamp,
+    isTask: false,
+    topicId: topicId || null,
+  };
+
+  // If there are @ mentions, create task cards
+  if (mentions.length > 0) {
+    message.isTask = true;
+
+    for (const mention of mentions) {
+      const taskId = 'HT-' + String(Date.now() + Math.floor(Math.random() * 1000));
+      const task = {
+        id: taskId,
+        title: content.replace(/@[a-zA-Z0-9_-]+\s*/g, '').trim().substring(0, 60) || '任务指派',
+        description: content.replace(/@[a-zA-Z0-9_-]+\s*/g, '').trim() || '无详细描述',
+        assignee: mention.agentId,
+        assigneeName: mention.agentName,
+        assigner: senderId,
+        status: 'pending',
+        createdAt: timestamp,
+        acceptedAt: null,
+        completedAt: null,
+        result: '',
+      };
+      hallTasks.push(task);
+      message.task = task;
+    }
+  }
+
+  hallMessages.push(message);
+
+  // ── Phase 2: Parse 【执行结果】 trigger word ────────────────────────────
+  const parsed = parseExecutionResult(content);
+  if (parsed && parsed.taskId) {
+    let targetTask = hallTasks.find(t => t.id === parsed.taskId);
+    if (!targetTask) {
+      const msg2 = hallMessages.find(m => m.task && m.task.id === parsed.taskId);
+      if (msg2) targetTask = msg2.task;
+    }
+    if (targetTask) {
+      targetTask.status = parsed.status;
+      targetTask.completedAt = new Date().toISOString();
+      targetTask.result = parsed.summary + (parsed.detail ? '\n\n详情：' + parsed.detail : '');
+
+      // Update execution chain step
+      if (targetTask.executionChain && targetTask.executionChain.length > 0) {
+        const lastStep = targetTask.executionChain[targetTask.executionChain.length - 1];
+        lastStep.status = parsed.status;
+        lastStep.result = targetTask.result;
+        lastStep.completedAt = targetTask.completedAt;
+      }
+
+      // Also update chain step if task has chainId
+      if (targetTask.chainId) {
+        const chain = chains.find(c => c.id === targetTask.chainId);
+        if (chain) {
+          const step = chain.steps.find(s => s.taskId === targetTask.id);
+          if (step) {
+            step.status = parsed.status;
+            step.result = targetTask.result;
+            step.completedAt = targetTask.completedAt;
+
+            if (parsed.status === 'completed') {
+              const nextIdx = chain.steps.findIndex(s => s.stepId === step.stepId + 1);
+              if (nextIdx !== -1) {
+                chain.steps[nextIdx].status = 'pending';
+              }
+            }
+          }
+        }
+      }
+
+      // Sync into messages
+      for (const m of hallMessages) {
+        if (m.task && m.task.id === targetTask.id) m.task = { ...targetTask };
+      }
+    }
+  }
+
+  res.json({ ok: true, message });
+});
+
+// GET /api/hall/agents — get online agents for Hall
+app.get('/api/hall/agents', (req, res) => {
+  res.json({ ok: true, agents: hallAgents });
+});
+
+// PUT /api/hall/tasks/:id — update task status (Phase 2: supports logs, chainId, stepIndex)
+app.put('/api/hall/tasks/:id', (req, res) => {
+  const { status, result, logs, chainId, stepIndex, deadline } = req.body;
+  let task = hallTasks.find(t => t.id === req.params.id);
+  if (!task) {
+    const msg = hallMessages.find(m => m.task && m.task.id === req.params.id);
+    if (msg) task = msg.task;
+  }
+  if (!task) return res.status(404).json({ ok: false, error: 'Task not found' });
+
+  if (status) task.status = status;
+  if (status === 'accepted') task.acceptedAt = new Date().toISOString();
+  if (status === 'running' && !task.startedAt) task.startedAt = new Date().toISOString();
+  if (status === 'completed' || status === 'failed') task.completedAt = new Date().toISOString();
+  if (result !== undefined) task.result = result;
+  if (logs !== undefined) task.logs = logs;
+  if (chainId !== undefined) task.chainId = chainId;
+  if (stepIndex !== undefined) task.stepIndex = stepIndex;
+  if (deadline !== undefined) task.deadline = deadline;
+
+  // Sync to hallMessages
+  for (const msg of hallMessages) {
+    if (msg.task && msg.task.id === task.id) msg.task = { ...task };
+  }
+
+  res.json({ ok: true, task });
+});
+
+// GET /api/hall/tasks — get all Hall tasks
+app.get('/api/hall/tasks', (req, res) => {
+  res.json({ ok: true, tasks: hallTasks });
+});
+
+// GET /api/hall/tasks/starred — get all starred tasks
+app.get('/api/hall/tasks/starred', (req, res) => {
+  // Tasks live in hallMessages (as msg.task), also check hallTasks for direct tasks
+  const starred = [];
+  for (const t of hallTasks) {
+    if (starredTasks.has(t.id)) starred.push(t);
+  }
+  // Also scan hallMessages for task cards
+  for (const msg of hallMessages) {
+    if (msg.task && starredTasks.has(msg.task.id)) {
+      if (!starred.find(t => t.id === msg.task.id)) {
+        starred.push(msg.task);
+      }
+    }
+  }
+  res.json({ ok: true, tasks: starred, total: starred.length });
+});
+
+// GET /api/hall/tasks/:id — get single task detail
+app.get('/api/hall/tasks/:id', (req, res) => {
+  let task = hallTasks.find(t => t.id === req.params.id);
+  if (!task) {
+    const msg = hallMessages.find(m => m.task && m.task.id === req.params.id);
+    if (msg) task = msg.task;
+  }
+  if (!task) return res.status(404).json({ ok: false, error: 'Task not found' });
+  res.json({ ok: true, task });
+});
+
+// ─── Hall Phase 2: Execution Chain Endpoints ────────────────────────────────
+
+// POST /api/hall/chains — create an execution chain
+app.post('/api/hall/chains', (req, res) => {
+  const { name, owner, steps } = req.body;
+  if (!name || !owner || !Array.isArray(steps) || steps.length === 0) {
+    return res.status(400).json({ ok: false, error: 'name, owner, and steps[] are required' });
+  }
+
+  const chainId = 'EC-' + String(chainCounter++).padStart(3, '0');
+  const now = new Date().toISOString();
+
+  const chainSteps = steps.map((s, i) => {
+    const stepId = 'ES-' + chainId + '-' + (i + 1);
+    const agent = hallAgents.find(a => a.id === s.agentId);
+    return {
+      stepId: i + 1,
+      stepIdStr: stepId,
+      agentId: s.agentId,
+      agentName: agent ? agent.name : s.agentId,
+      task: s.task,
+      status: i === 0 ? 'pending' : 'locked',
+      taskId: null,
+      sessionId: null,
+      result: '',
+      startedAt: null,
+      completedAt: null,
+      duration: null,
+      failureReason: '',
+      isBlocking: s.isBlocking !== false,
+    };
+  });
+
+  const chain = {
+    id: chainId,
+    name,
+    owner,
+    status: 'pending',
+    currentStep: 1,
+    steps: chainSteps,
+    createdAt: now,
+    completedAt: null,
+    failureReason: '',
+  };
+
+  chains.push(chain);
+  res.json({ ok: true, chain });
+});
+
+// GET /api/hall/chains — list all chains
+app.get('/api/hall/chains', (req, res) => {
+  const { status } = req.query;
+  let result = chains;
+  if (status) result = result.filter(c => c.status === status);
+  res.json({ ok: true, chains: result, total: result.length });
+});
+
+// GET /api/hall/chains/:id — get chain detail
+app.get('/api/hall/chains/:id', (req, res) => {
+  const chain = chains.find(c => c.id === req.params.id);
+  if (!chain) return res.status(404).json({ ok: false, error: 'Chain not found' });
+  res.json({ ok: true, chain });
+});
+
+// PUT /api/hall/chains/:id/steps/:stepId — update a chain step status
+app.put('/api/hall/chains/:id/steps/:stepId', (req, res) => {
+  const chain = chains.find(c => c.id === req.params.id);
+  if (!chain) return res.status(404).json({ ok: false, error: 'Chain not found' });
+
+  const step = chain.steps.find(s => s.stepId === parseInt(req.params.stepId));
+  if (!step) return res.status(404).json({ ok: false, error: 'Step not found' });
+
+  const { status, result, failureReason, taskId, sessionId } = req.body;
+
+  if (status) {
+    // Validate status transitions
+    const allowedStatuses = ['pending', 'accepted', 'running', 'completed', 'failed', 'skipped'];
+    if (!allowedStatuses.includes(status)) {
+      return res.status(400).json({ ok: false, error: `Invalid status: ${status}` });
+    }
+
+    const prevStatus = step.status;
+    step.status = status;
+
+    if (status === 'accepted' || status === 'running') {
+      step.startedAt = step.startedAt || new Date().toISOString();
+    } else if (status === 'completed') {
+      step.completedAt = new Date().toISOString();
+      if (step.startedAt) {
+        step.duration = Math.round((new Date(step.completedAt) - new Date(step.startedAt)) / 1000);
+      }
+      step.result = result || '';
+
+      // Unlock next step
+      const nextStepIdx = chain.steps.findIndex(s => s.stepId === step.stepId + 1);
+      if (nextStepIdx !== -1) {
+        const nextStep = chain.steps[nextStepIdx];
+        if (nextStep.status === 'locked') {
+          nextStep.status = 'pending';
+        }
+      }
+    } else if (status === 'failed') {
+      step.failureReason = failureReason || '执行失败';
+      step.completedAt = new Date().toISOString();
+      chain.status = 'failed';
+      chain.failureReason = `Step ${step.stepId} failed: ${step.failureReason}`;
+      // Mark subsequent locked steps as skipped
+      for (const s of chain.steps) {
+        if (s.status === 'locked') s.status = 'skipped';
+      }
+    } else if (status === 'skipped') {
+      step.completedAt = new Date().toISOString();
+      // Unlock next step
+      const nextStepIdx = chain.steps.findIndex(s => s.stepId === step.stepId + 1);
+      if (nextStepIdx !== -1) {
+        const nextStep = chain.steps[nextStepIdx];
+        if (nextStep.status === 'locked') nextStep.status = 'pending';
+      }
+    }
+  }
+
+  if (result !== undefined) step.result = result;
+  if (failureReason !== undefined) step.failureReason = failureReason;
+  if (taskId !== undefined) step.taskId = taskId;
+  if (sessionId !== undefined) step.sessionId = sessionId;
+
+  // Update chain currentStep to the first non-completed step
+  const firstActive = chain.steps.find(s => ['pending', 'accepted', 'running'].includes(s.status));
+  if (firstActive) {
+    chain.currentStep = firstActive.stepId;
+  } else if (chain.status !== 'failed') {
+    // All steps done — check if any failed
+    const hasFailed = chain.steps.some(s => s.status === 'failed');
+    chain.status = hasFailed ? 'failed' : 'completed';
+    if (chain.status === 'completed') chain.completedAt = new Date().toISOString();
+  }
+
+  // Sync task result into hallTasks if step has taskId
+  if (step.taskId) {
+    const t = hallTasks.find(t => t.id === step.taskId);
+    if (t) {
+      if (status === 'completed') {
+        t.status = 'completed';
+        t.completedAt = step.completedAt;
+        t.result = step.result;
+      } else if (status === 'failed') {
+        t.status = 'failed';
+        t.failureReason = step.failureReason;
+        t.completedAt = step.completedAt;
+      }
+      // Sync into messages
+      for (const msg of hallMessages) {
+        if (msg.task && msg.task.id === t.id) msg.task = { ...t };
+      }
+    }
+  }
+
+  res.json({ ok: true, chain, step });
+});
+
+// POST /api/hall/tasks/:id/result — receive execution result from agent (Phase 2)
+app.post('/api/hall/tasks/:id/result', (req, res) => {
+  let task = hallTasks.find(t => t.id === req.params.id);
+  if (!task) {
+    const msg = hallMessages.find(m => m.task && m.task.id === req.params.id);
+    if (msg) task = msg.task;
+  }
+  if (!task) return res.status(404).json({ ok: false, error: 'Task not found' });
+
+  const { status, result, summary, detail, duration, steps: resultSteps } = req.body;
+
+  if (status === 'completed' || status === 'failed') {
+    task.status = status;
+    task.completedAt = new Date().toISOString();
+    task.result = result || summary || detail || (status === 'completed' ? '任务已完成' : '执行失败');
+    if (duration) task.duration = duration;
+
+    // Update execution chain step
+    if (task.executionChain && task.executionChain.length > 0) {
+      const lastStep = task.executionChain[task.executionChain.length - 1];
+      lastStep.status = status;
+      lastStep.result = task.result;
+      lastStep.completedAt = task.completedAt;
+    }
+
+    // Also update chain if task has chainId
+    if (task.chainId) {
+      const chain = chains.find(c => c.id === task.chainId);
+      if (chain) {
+        const step = chain.steps.find(s => s.taskId === task.id);
+        if (step) {
+          step.status = status;
+          step.result = task.result;
+          step.completedAt = task.completedAt;
+          if (status === 'completed') {
+            const nextIdx = chain.steps.findIndex(s => s.stepId === step.stepId + 1);
+            if (nextIdx !== -1) {
+              chain.steps[nextIdx].status = 'pending';
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // Sync to hallMessages
+  for (const msg of hallMessages) {
+    if (msg.task && msg.task.id === task.id) {
+      msg.task = { ...task };
+    }
+  }
+
+  res.json({ ok: true, task });
+});
+
+// POST /api/hall/tasks/:id/execute — trigger agent execution (Phase 2, sessions_send)
+app.post('/api/hall/tasks/:id/execute', async (req, res) => {
+  let task = hallTasks.find(t => t.id === req.params.id);
+  if (!task) {
+    const msg = hallMessages.find(m => m.task && m.task.id === req.params.id);
+    if (msg) task = msg.task;
+  }
+  if (!task) return res.status(404).json({ ok: false, error: 'Task not found' });
+
+  const { action } = req.body; // 'accept' | 'reject' | 'execute' | 'complete' | 'fail' | 'chain'
+
+  // ── Phase 2: sessions_send execution trigger ──────────────────────────────
+  if (action === 'execute') {
+    if (!['pending', 'accepted'].includes(task.status)) {
+      return res.status(400).json({ ok: false, error: `Cannot execute task in '${task.status}' state` });
+    }
+
+    const timeout = req.body.timeout || 300;
+    const taskMessage = `【任务执行】
+任务：${task.title}
+描述：${task.description}
+来源：Hall
+截止：${task.deadline || '未设置'}
+
+请在执行完成后，将结果通过以下格式回传 Hall：
+【执行结果】任务ID: ${task.id} | 状态: success/failed | 结果摘要: ... | 详情: ...`;
+
+    // Call sessions_send
+    const sendResult = await sessions_send(task.assignee, taskMessage, timeout);
+
+    task.status = 'running';
+    task.startedAt = task.startedAt || new Date().toISOString();
+    task.acceptedAt = task.acceptedAt || new Date().toISOString();
+    task.sessionId = sendResult?.sessionKey || sendResult?.result?.sessionKey || null;
+    task.timeout = timeout;
+
+    // Initialize execution chain (single-step for single agent)
+    if (!task.executionChain || task.executionChain.length === 0) {
+      task.executionChain = [{
+        stepId: 1,
+        agentId: task.assignee,
+        agentName: task.assigneeName,
+        status: 'running',
+        task: task.title,
+        result: '',
+        startedAt: task.startedAt,
+        completedAt: null,
+        sessionId: task.sessionId,
+      }];
+    } else {
+      task.executionChain[0].status = 'running';
+      task.executionChain[0].startedAt = task.startedAt;
+      task.executionChain[0].sessionId = task.sessionId;
+    }
+
+    // Sync back to hallMessages
+    for (const msg of hallMessages) {
+      if (msg.task && msg.task.id === task.id) {
+        msg.task = { ...task };
+      }
+    }
+
+    return res.json({
+      ok: true,
+      task,
+      sessionKey: task.sessionId,
+      status: 'running',
+      startedAt: task.startedAt,
+      timeout,
+    });
+  }
+
+  // ── Legacy actions (Phase 1) ───────────────────────────────────────────────
+  if (action === 'accept') {
+    if (!['pending'].includes(task.status)) {
+      return res.status(400).json({ ok: false, error: `Cannot accept task in '${task.status}' state` });
+    }
+    task.status = 'accepted';
+    task.acceptedAt = new Date().toISOString();
+    task.executionChain = [{
+      stepId: 1,
+      agentId: task.assignee,
+      agentName: task.assigneeName,
+      status: 'pending',
+      task: task.title,
+      result: '',
+      startedAt: null,
+      completedAt: null,
+    }];
+  } else if (action === 'reject') {
+    if (!['pending'].includes(task.status)) {
+      return res.status(400).json({ ok: false, error: `Cannot reject task in '${task.status}' state` });
+    }
+    task.status = 'rejected';
+  } else if (action === 'complete') {
+    task.status = 'completed';
+    task.completedAt = new Date().toISOString();
+    task.result = req.body.result || '任务已完成';
+    if (task.executionChain && task.executionChain.length > 0) {
+      task.executionChain[task.executionChain.length - 1].status = 'completed';
+      task.executionChain[task.executionChain.length - 1].result = task.result;
+      task.executionChain[task.executionChain.length - 1].completedAt = task.completedAt;
+    }
+  } else if (action === 'fail') {
+    task.status = 'failed';
+    task.failureReason = req.body.reason || '执行失败';
+    task.completedAt = new Date().toISOString();
+    if (task.executionChain && task.executionChain.length > 0) {
+      task.executionChain[task.executionChain.length - 1].status = 'failed';
+    }
+  } else if (action === 'chain') {
+    // Multi-step execution chain
+    const { steps } = req.body;
+    if (!Array.isArray(steps) || steps.length === 0) {
+      return res.status(400).json({ ok: false, error: 'steps array required for chain execution' });
+    }
+    task.status = 'running';
+    task.acceptedAt = new Date().toISOString();
+    task.executionChain = steps.map((s, i) => ({
+      stepId: i + 1,
+      agentId: s.agentId,
+      agentName: s.agentName,
+      task: s.task || task.title,
+      status: i === 0 ? 'running' : 'locked',
+      result: '',
+      startedAt: i === 0 ? new Date().toISOString() : null,
+      completedAt: null,
+    }));
+  }
+
+  // Sync back to hallMessages
+  for (const msg of hallMessages) {
+    if (msg.task && msg.task.id === task.id) {
+      msg.task = { ...task };
+    }
+  }
+
+  res.json({ ok: true, task });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Hall Phase 3: Topics Store
+// ═══════════════════════════════════════════════════════════════════════════════
+let topics = [
+  {
+    id: 'topic-001',
+    name: '💬 日常讨论',
+    color: '#6C8EEF',
+    creatorId: 'pm',
+    creatorName: 'PM',
+    createdAt: new Date(Date.now() - 86400000 * 3).toISOString(),
+    messageCount: 4,
+  },
+  {
+    id: 'topic-002',
+    name: '🐛 Bug 追踪',
+    color: '#EF4444',
+    creatorId: 'qa',
+    creatorName: 'QA',
+    createdAt: new Date(Date.now() - 86400000).toISOString(),
+    messageCount: 2,
+  },
+];
+
+let topicCounter = 3;
+
+// In-memory star store (client-side localStorage, but we track via API calls)
+let starredTasks = new Set(['HT-001']); // Pre-star HT-001 for demo
+
+// ─── Hall Phase 3: Topics APIs ─────────────────────────────────────────────
+
+// GET /api/hall/topics — list all topics
+app.get('/api/hall/topics', (req, res) => {
+  res.json({ ok: true, topics, total: topics.length });
+});
+
+// POST /api/hall/topics — create a new topic
+app.post('/api/hall/topics', (req, res) => {
+  const { name, color, creatorId, creatorName } = req.body;
+  if (!name) return res.status(400).json({ ok: false, error: 'name is required' });
+
+  const topic = {
+    id: 'topic-' + String(topicCounter++).padStart(3, '0'),
+    name: name || '新话题',
+    color: color || '#6C8EEF',
+    creatorId: creatorId || 'unknown',
+    creatorName: creatorName || '未知',
+    createdAt: new Date().toISOString(),
+    messageCount: 0,
+  };
+  topics.push(topic);
+  res.json({ ok: true, topic });
+});
+
+// GET /api/hall/topics/:id/messages — get messages for a specific topic
+app.get('/api/hall/topics/:id/messages', (req, res) => {
+  const { page = 1, pageSize = 20 } = req.query;
+  const topicId = req.params.id;
+  const topic = topics.find(t => t.id === topicId);
+  if (!topic) return res.status(404).json({ ok: false, error: 'Topic not found' });
+
+  // Filter messages that belong to this topic (by topicId tag in message)
+  const allTopicMsgs = hallMessages.filter(m => m.topicId === topicId);
+  const total = allTopicMsgs.length;
+  const start = (parseInt(page) - 1) * parseInt(pageSize);
+  const messages = allTopicMsgs.slice(start, start + parseInt(pageSize));
+
+  res.json({
+    ok: true,
+    messages,
+    topic,
+    pagination: {
+      page: parseInt(page),
+      pageSize: parseInt(pageSize),
+      total,
+      totalPages: Math.ceil(total / parseInt(pageSize)),
+      hasMore: start + parseInt(pageSize) < total,
+    },
+  });
+});
+
+// POST /api/hall/messages — updated to support topicId
+// (already defined above, we extend it to support topicId)
+
+// ─── Hall Phase 3: Message Search API ──────────────────────────────────────
+
+// GET /api/hall/messages/search — search messages
+app.get('/api/hall/messages/search', (req, res) => {
+  const { q, senderId, topicId, startDate, endDate, page = 1, pageSize = 20 } = req.query;
+  if (!q && !senderId && !topicId) {
+    return res.status(400).json({ ok: false, error: 'At least one of q, senderId, or topicId is required' });
+  }
+
+  let results = hallMessages;
+
+  if (q) {
+    const lowerQ = q.toLowerCase();
+    results = results.filter(m =>
+      m.content.toLowerCase().includes(lowerQ) ||
+      (m.senderName && m.senderName.toLowerCase().includes(lowerQ)) ||
+      (m.task && (
+        m.task.title.toLowerCase().includes(lowerQ) ||
+        (m.task.description && m.task.description.toLowerCase().includes(lowerQ)) ||
+        m.task.id.toLowerCase().includes(lowerQ)
+      ))
+    );
+  }
+
+  if (senderId) {
+    results = results.filter(m => m.senderId === senderId);
+  }
+
+  if (topicId) {
+    results = results.filter(m => m.topicId === topicId);
+  }
+
+  if (startDate) {
+    const start = new Date(startDate);
+    results = results.filter(m => new Date(m.timestamp) >= start);
+  }
+
+  if (endDate) {
+    const end = new Date(endDate);
+    results = results.filter(m => new Date(m.timestamp) <= end);
+  }
+
+  // Sort by timestamp descending (newest first)
+  results = [...results].sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+
+  const total = results.length;
+  const start = (parseInt(page) - 1) * parseInt(pageSize);
+  const paginatedResults = results.slice(start, start + parseInt(pageSize));
+
+  // Add context preview (surrounding text for search highlight)
+  const enriched = paginatedResults.map(m => {
+    let highlight = m.content;
+    if (q) {
+      const idx = m.content.toLowerCase().indexOf(q.toLowerCase());
+      if (idx !== -1) {
+        const start2 = Math.max(0, idx - 20);
+        const end2 = Math.min(m.content.length, idx + q.length + 40);
+        highlight = (start2 > 0 ? '…' : '') + m.content.substring(start2, end2) + (end2 < m.content.length ? '…' : '');
+      }
+    }
+    return { ...m, highlight, matchedField: q ? 'content' : 'filter' };
+  });
+
+  res.json({
+    ok: true,
+    results: enriched,
+    query: q,
+    pagination: {
+      page: parseInt(page),
+      pageSize: parseInt(pageSize),
+      total,
+      totalPages: Math.ceil(total / parseInt(pageSize)),
+      hasMore: start + parseInt(pageSize) < total,
+    },
+    summary: `找到 ${total} 条相关消息${q ? ` (关键词: "${q}")` : ''}`,
+  });
+});
+
+// ─── Hall Phase 3: Task Star APIs ──────────────────────────────────────────
+
+// POST /api/hall/tasks/:id/star — star a task
+app.post('/api/hall/tasks/:id/star', (req, res) => {
+  const taskId = req.params.id;
+  // Check hallTasks first, then hallMessages
+  let task = hallTasks.find(t => t.id === taskId);
+  if (!task) {
+    const msg = hallMessages.find(m => m.task && m.task.id === taskId);
+    if (msg) task = msg.task;
+  }
+  if (!task) return res.status(404).json({ ok: false, error: 'Task not found' });
+
+  starredTasks.add(taskId);
+  // Also add to hallTasks if found in messages only
+  if (!hallTasks.find(t => t.id === taskId)) {
+    hallTasks.push(task);
+  }
+
+  res.json({ ok: true, starred: true, taskId });
+});
+
+// DELETE /api/hall/tasks/:id/star — unstar a task
+app.delete('/api/hall/tasks/:id/star', (req, res) => {
+  const taskId = req.params.id;
+  starredTasks.delete(taskId);
+  res.json({ ok: true, starred: false, taskId });
+});
+
+// GET /api/hall/messages — updated: support topicId & pagination
+// (already defined, but we update it to support topicId query param)
+
+// ─── Update POST /api/hall/messages to support topicId ─────────────────────
+// This is already defined above; messages with topicId will be stored
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// v1.4: Token Usage Endpoints
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Fetch all sessions from Gateway and return raw list
+async function fetchAllSessions() {
+  try {
+    const res = await fetch(`${GATEWAY_URL}/tools/invoke`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${GATEWAY_TOKEN}` },
+      body: JSON.stringify({ tool: 'sessions_list', action: 'json', args: { limit: 500, messageLimit: 0 } })
+    });
+    const data = await res.json();
+    return data?.result?.details?.sessions || [];
+  } catch (e) {
+    console.error('[Usage] fetchAllSessions error:', e.message);
+    return [];
+  }
+}
+
+// Parse agentId from session key
+function agentIdFromKey(key) {
+  if (!key) return null;
+  if (key.includes(':subagent:')) {
+    const parts = key.split(':');
+    return parts[1] || null;
+  }
+  const match = key.match(/^agent:([^:]+):/);
+  return match ? match[1] : null;
+}
+
+// ─── GET /api/usage — aggregate token usage across all agents ───────────────
+app.get('/api/usage', async (req, res) => {
+  const { period } = req.query; // 'today' | 'week' | 'month' | 'all' (default: all)
+  const now = Date.now();
+
+  let periodMs = Infinity;
+  if (period === 'today') periodMs = 24 * 3600 * 1000;
+  else if (period === 'week') periodMs = 7 * 24 * 3600 * 1000;
+  else if (period === 'month') periodMs = 30 * 24 * 3600 * 1000;
+
+  try {
+    const sessions = await fetchAllSessions();
+
+    // Build per-agent aggregation
+    const agentUsageMap = {};
+    const allAgentIds = Object.keys(AGENT_WORKSPACES);
+    for (const id of allAgentIds) {
+      agentUsageMap[id] = {
+        agentId: id,
+        emoji: AGENT_META[id]?.emoji || '🤖',
+        agentName: id.charAt(0).toUpperCase() + id.slice(1),
+        totalTokens: 0,
+        totalSessions: 0,
+        totalCostUsd: 0,
+        totalRuntimeMs: 0,
+        avgTokensPerSession: 0,
+        lastSeen: null,
+        sessions: [],
+      };
+    }
+
+    for (const s of sessions) {
+      const agentId = agentIdFromKey(s.key);
+      if (!agentId || !agentUsageMap[agentId]) continue;
+
+      const sessionTime = s.updatedAt || s.startedAt || now;
+      if (now - sessionTime > periodMs) continue;
+
+      const tokens = s.totalTokens || 0;
+      const cost = s.estimatedCostUsd || 0;
+      const runtime = s.runtimeMs || 0;
+      const isRunning = s.status === 'running' || s.status === 'active';
+
+      const u = agentUsageMap[agentId];
+      u.totalTokens += tokens;
+      u.totalSessions += 1;
+      u.totalCostUsd += cost;
+      u.totalRuntimeMs += runtime;
+      if (!u.lastSeen || sessionTime > u.lastSeen) u.lastSeen = sessionTime;
+
+      u.sessions.push({
+        sessionId: s.sessionId || '',
+        key: s.key || '',
+        model: s.model || 'unknown',
+        totalTokens: tokens,
+        contextTokens: s.contextTokens || 0,
+        estimatedCostUsd: cost,
+        runtimeMs: runtime,
+        status: s.status || 'unknown',
+        startedAt: s.startedAt ? new Date(s.startedAt).toISOString() : null,
+        endedAt: s.endedAt ? new Date(s.endedAt).toISOString() : null,
+        updatedAt: s.updatedAt ? new Date(s.updatedAt).toISOString() : null,
+        isRunning,
+      });
+    }
+
+    let agents = Object.values(agentUsageMap);
+    for (const u of agents) {
+      u.avgTokensPerSession = u.totalSessions > 0 ? Math.round(u.totalTokens / u.totalSessions) : 0;
+      u.totalCostUsd = Math.round(u.totalCostUsd * 1000000) / 1000000;
+      u.lastSeen = u.lastSeen ? new Date(u.lastSeen).toLocaleString('zh-CN') : null;
+      u.sessions.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+    }
+
+    agents.sort((a, b) => b.totalTokens - a.totalTokens);
+
+    const totalTokens = agents.reduce((sum, u) => sum + u.totalTokens, 0);
+    const totalCostUsd = agents.reduce((sum, u) => sum + u.totalCostUsd, 0);
+    const totalSessions = agents.reduce((sum, u) => sum + u.totalSessions, 0);
+
+    res.json({
+      ok: true,
+      period: period || 'all',
+      summary: {
+        totalTokens,
+        totalCostUsd: Math.round(totalCostUsd * 1000000) / 1000000,
+        totalSessions,
+        activeAgents: agents.filter(u => u.totalSessions > 0).length,
+        totalAgents: agents.length,
+        periodLabel: period === 'today' ? '今日' : period === 'week' ? '本周' : period === 'month' ? '本月' : '全部',
+      },
+      agents,
+      lastRefresh: new Date().toLocaleString('zh-CN'),
+    });
+  } catch (e) {
+    console.error('[Usage] /api/usage error:', e.message);
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// ─── GET /api/usage/:agentId — detailed token usage for single agent ────────
+app.get('/api/usage/:agentId', async (req, res) => {
+  const { agentId } = req.params;
+  const { period, limit = 50 } = req.query;
+
+  if (!AGENT_WORKSPACES[agentId]) {
+    return res.status(404).json({ ok: false, error: 'Agent not found' });
+  }
+
+  const now = Date.now();
+  let periodMs = Infinity;
+  if (period === 'today') periodMs = 24 * 3600 * 1000;
+  else if (period === 'week') periodMs = 7 * 24 * 3600 * 1000;
+  else if (period === 'month') periodMs = 30 * 24 * 3600 * 1000;
+
+  try {
+    const sessions = await fetchAllSessions();
+
+    const agentSessions = sessions
+      .filter(s => agentIdFromKey(s.key) === agentId)
+      .filter(s => {
+        const t = s.updatedAt || s.startedAt || now;
+        return now - t <= periodMs;
+      })
+      .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))
+      .slice(0, parseInt(limit))
+      .map(s => ({
+        sessionId: s.sessionId || '',
+        key: s.key || '',
+        model: s.model || 'unknown',
+        totalTokens: s.totalTokens || 0,
+        contextTokens: s.contextTokens || 0,
+        estimatedCostUsd: s.estimatedCostUsd || 0,
+        runtimeMs: s.runtimeMs || 0,
+        status: s.status || 'unknown',
+        startedAt: s.startedAt ? new Date(s.startedAt).toISOString() : null,
+        endedAt: s.endedAt ? new Date(s.endedAt).toISOString() : null,
+        updatedAt: s.updatedAt ? new Date(s.updatedAt).toISOString() : null,
+        isRunning: s.status === 'running' || s.status === 'active',
+      }));
+
+    const totalTokens = agentSessions.reduce((sum, s) => sum + s.totalTokens, 0);
+    const totalCostUsd = agentSessions.reduce((sum, s) => sum + s.estimatedCostUsd, 0);
+    const totalRuntimeMs = agentSessions.reduce((sum, s) => sum + s.runtimeMs, 0);
+    const runningSessions = agentSessions.filter(s => s.isRunning);
+
+    // Compute trend: group sessions by day
+    const dailyTrend = {};
+    for (const s of agentSessions) {
+      if (!s.startedAt) continue;
+      const day = s.startedAt.substring(0, 10);
+      if (!dailyTrend[day]) dailyTrend[day] = { date: day, tokens: 0, sessions: 0, costUsd: 0 };
+      dailyTrend[day].tokens += s.totalTokens;
+      dailyTrend[day].sessions += 1;
+      dailyTrend[day].costUsd += s.estimatedCostUsd;
+    }
+    const trend = Object.values(dailyTrend).sort((a, b) => a.date.localeCompare(b.date));
+
+    // Model breakdown
+    const modelBreakdown = {};
+    for (const s of agentSessions) {
+      const m = s.model || 'unknown';
+      if (!modelBreakdown[m]) modelBreakdown[m] = { model: m, tokens: 0, sessions: 0, costUsd: 0 };
+      modelBreakdown[m].tokens += s.totalTokens;
+      modelBreakdown[m].sessions += 1;
+      modelBreakdown[m].costUsd += s.estimatedCostUsd;
+    }
+
+    res.json({
+      ok: true,
+      agentId,
+      emoji: AGENT_META[agentId]?.emoji || '🤖',
+      agentName: agentId.charAt(0).toUpperCase() + agentId.slice(1),
+      period: period || 'all',
+      summary: {
+        totalTokens,
+        totalCostUsd: Math.round(totalCostUsd * 1000000) / 1000000,
+        totalSessions: agentSessions.length,
+        totalRuntimeMs,
+        avgTokensPerSession: agentSessions.length > 0 ? Math.round(totalTokens / agentSessions.length) : 0,
+        runningSessions: runningSessions.length,
+        periodLabel: period === 'today' ? '今日' : period === 'week' ? '本周' : period === 'month' ? '本月' : '全部',
+      },
+      sessions: agentSessions,
+      trend,
+      modelBreakdown: Object.values(modelBreakdown),
+      lastRefresh: new Date().toLocaleString('zh-CN'),
+    });
+  } catch (e) {
+    console.error('[Usage] /api/usage/:agentId error:', e.message);
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// ─── v1.4 Alert History Endpoint ───────────────────────────────────────────
+// GET /api/alerts/history — paginated alert history with filtering
+app.get('/api/alerts/history', (req, res) => {
+  const { agent_id, level, start_time, end_time, page = 1, page_size = 20 } = req.query;
+
+  let historyAlerts = [...alerts]; // alerts store has all historical alerts
+
+  // Filter by agent_id
+  if (agent_id) {
+    historyAlerts = historyAlerts.filter(a => a.agentId === agent_id);
+  }
+
+  // Filter by level (severity)
+  if (level) {
+    historyAlerts = historyAlerts.filter(a => a.level === level);
+  }
+
+  // Filter by time range
+  if (start_time) {
+    const st = new Date(start_time).getTime();
+    historyAlerts = historyAlerts.filter(a => new Date(a.createdAt).getTime() >= st);
+  }
+  if (end_time) {
+    const et = new Date(end_time).getTime();
+    historyAlerts = historyAlerts.filter(a => new Date(a.createdAt).getTime() <= et);
+  }
+
+  // Sort by createdAt descending (newest first)
+  historyAlerts.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+
+  // Build summary stats (from unfiltered)
+  const total = historyAlerts.length;
+  const criticalCount = alerts.filter(a => a.level === 'critical').length;
+  const warningCount = alerts.filter(a => a.level === 'warning').length;
+  const infoCount = alerts.filter(a => a.level === 'info').length;
+
+  // Pagination
+  const p = parseInt(page);
+  const ps = parseInt(page_size);
+  const start = (p - 1) * ps;
+  const items = historyAlerts.slice(start, start + ps).map(a => ({
+    id: a.id,
+    agent_id: a.agentId,
+    level: a.level,
+    title: a.message || `${a.agentId} 告警`,
+    message: a.message || '',
+    trigger_time: a.createdAt,
+    recover_time: a.resolvedAt || null,
+    duration_minutes: a.resolvedAt
+      ? Math.round((new Date(a.resolvedAt).getTime() - new Date(a.createdAt).getTime()) / 60000)
+      : Math.round((Date.now() - new Date(a.createdAt).getTime()) / 60000),
+    status: a.status === 'resolved' ? 'recovered' : (a.status === 'active' ? 'ongoing' : 'escalated'),
+    threshold: a.threshold ? `超过 ${a.threshold}%` : null,
+    current_value: a.value ? `${a.value}%` : null,
+    suggestion: a.level === 'critical'
+      ? '1. 检查该 Agent 当前任务是否正常\n2. 考虑增加 context window 配置\n3. 如持续出现，建议重启 Agent'
+      : a.level === 'warning'
+      ? '建议持续观察，如情况恶化请及时处理'
+      : '正常运维监控告警，可忽略',
+  }));
+
+  res.json({
+    total,
+    page: p,
+    page_size: ps,
+    summary: { critical: criticalCount, warning: warningCount, info: infoCount },
+    items,
+  });
 });
 
 // ─── SPA Fallback ──────────────────────────────────────────────────────────
@@ -362,5 +1870,5 @@ app.get('*', (req, res) => {
 });
 
 app.listen(PORT, '0.0.0.0', () => {
-  console.log(`Control Center v1.2 running on http://0.0.0.0:${PORT}`);
+  console.log(`Control Center v1.7 (Token Usage + Hall Phase 3) running on http://0.0.0.0:${PORT}`);
 });

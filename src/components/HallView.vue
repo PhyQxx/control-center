@@ -765,7 +765,7 @@ function highlightSearch(text) {
 function scrollToBottom() {
   nextTick(() => {
     if (messageListRef.value) {
-      messageListRef.value.scrollTop = messageListRef.value.scrollHeight
+      messageListRef.value.scrollTop = messageListRef.value.scrollHeight // newest messages are at bottom
     }
   })
 }
@@ -851,9 +851,9 @@ async function loadTopicMessages(topicId, page = 1) {
     const data = await res.json()
     if (data.ok) {
       if (page === 1) {
-        messages.value = data.messages
+        messages.value = data.messages.reverse() // reverse: oldest at top, newest at bottom
       } else {
-        messages.value = [...messages.value, ...data.messages]
+        messages.value = [...data.messages.reverse(), ...messages.value] // older msgs at front, then reverse for display
       }
       hasMoreMessages.value = data.pagination.hasMore
       currentPage.value = page
@@ -923,7 +923,7 @@ async function loadMoreMessages() {
       const res = await fetch(`/api/hall/messages?${params}`)
       const data = await res.json()
       if (data.ok) {
-        messages.value = [...messages.value, ...data.messages]
+        messages.value = [...data.messages.reverse(), ...messages.value] // older msgs at front, then reverse for display
         hasMoreMessages.value = data.pagination.hasMore
         currentPage.value = nextPage
       }
@@ -1105,9 +1105,9 @@ async function loadMessages(page = 1) {
     const data = await res.json()
     if (data.ok) {
       if (page === 1) {
-        messages.value = data.messages
+        messages.value = data.messages.reverse() // reverse: oldest at top, newest at bottom
       } else {
-        messages.value = [...messages.value, ...data.messages]
+        messages.value = [...data.messages.reverse(), ...messages.value] // older msgs at front, then reverse for display
       }
       hasMoreMessages.value = data.pagination.hasMore
       currentPage.value = page
@@ -1145,7 +1145,7 @@ async function sendMessage() {
     })
     const data = await res.json()
     if (data.ok) {
-      messages.value = [data.message, ...messages.value]
+      messages.value = [...messages.value, data.message] // append new msg to bottom
       mentionAgents.value = []
       inputText.value = ''
       scrollToBottom()
@@ -1380,12 +1380,12 @@ const truncate = (val, len) => {
 /* ─── Hall Root ─────────────────────────────────────────────────────────── */
 .hall-root {
   display: flex;
-  height: calc(100vh - 120px);
-  min-height: 500px;
+  flex: 1;
+  overflow: hidden;
   background: #0D1117;
   border: 1px solid #30363D;
   border-radius: 12px;
-  overflow: hidden;
+  min-height: 0; /* allow flex shrinking */
 }
 
 /* ─── Sidebar ──────────────────────────────────────────────────────────── */

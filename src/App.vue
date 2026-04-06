@@ -31,7 +31,9 @@
           </template>
         </el-tab-pane>
         <el-tab-pane label="📋 任务看板" name="tasks" />
+        <el-tab-pane label="🔬 Token 用量" name="usage" />
         <el-tab-pane label="🏛 协作大厅" name="hall" />
+        <el-tab-pane label="⚙️ 设置" name="settings" />
       </el-tabs>
     </div>
 
@@ -318,75 +320,28 @@
         </div>
       </div>
 
+      <!-- ========== USAGE (v1.4) ========== -->
+      <div v-if="activeTab === 'usage'" class="usage-tab"><UsageView /></div>
+
       <!-- ========== TASKS ========== -->
-      <div v-if="activeTab === 'tasks'">
-        <div class="section-title">任务看板</div>
-        <div class="kanban-board">
-          <div class="kanban-col">
-            <div class="kanban-header">
-              <span class="kanban-title">📝 待处理</span>
-              <el-tag size="small">{{ todoTasks.length }}</el-tag>
-            </div>
-            <div class="kanban-body">
-              <div v-for="task in todoTasks" :key="task.id" class="task-card" @click="showDetail(task.agent)">
-                <div class="task-card-top">
-                  <span v-if="task.priority" class="task-priority" :class="'priority-' + task.priority">{{ priorityLabel(task.priority) }}</span>
-                  <span v-if="task.deadline" class="task-deadline">⏰ {{ task.deadline }}</span>
-                </div>
-                <div class="task-title">{{ task.title }}</div>
-                <div class="task-meta">
-                  <span class="task-assignee">{{ task.agentName }}</span>
-                  <span v-if="task.tokenInfo" class="task-token">{{ task.tokenInfo }}</span>
-                </div>
-              </div>
-              <div v-if="todoTasks.length === 0" class="kanban-empty">暂无待处理任务</div>
-            </div>
-          </div>
-          <div class="kanban-col">
-            <div class="kanban-header">
-              <span class="kanban-title">⚡ 进行中</span>
-              <el-tag size="small" type="warning">{{ runningTasks.length }}</el-tag>
-            </div>
-            <div class="kanban-body">
-              <div v-for="task in runningTasks" :key="task.id" class="task-card running" @click="showDetail(task.agent)">
-                <div class="task-card-top">
-                  <span v-if="task.priority" class="task-priority" :class="'priority-' + task.priority">{{ priorityLabel(task.priority) }}</span>
-                  <span v-if="task.deadline" class="task-deadline">⏰ {{ task.deadline }}</span>
-                </div>
-                <div class="task-title">{{ task.title }}</div>
-                <div class="task-meta">
-                  <span class="task-assignee">{{ task.agentName }}</span>
-                  <span v-if="task.tokenInfo" class="task-token">{{ task.tokenInfo }}</span>
-                </div>
-              </div>
-              <div v-if="runningTasks.length === 0" class="kanban-empty">暂无进行中任务</div>
-            </div>
-          </div>
-          <div class="kanban-col">
-            <div class="kanban-header">
-              <span class="kanban-title">✅ 已完成</span>
-              <el-tag size="small" type="success">{{ doneTasks.length }}</el-tag>
-            </div>
-            <div class="kanban-body">
-              <div v-for="task in doneTasks" :key="task.id" class="task-card done" @click="showDetail(task.agent)">
-                <div class="task-card-top">
-                  <span v-if="task.priority" class="task-priority" :class="'priority-' + task.priority">{{ priorityLabel(task.priority) }}</span>
-                  <span v-if="task.deadline" class="task-deadline">⏰ {{ task.deadline }}</span>
-                </div>
-                <div class="task-title">{{ task.title }}</div>
-                <div class="task-meta">
-                  <span class="task-assignee">{{ task.agentName }}</span>
-                </div>
-              </div>
-              <div v-if="doneTasks.length === 0" class="kanban-empty">暂无已完成任务</div>
-            </div>
-          </div>
-        </div>
-      </div>
+      <div v-if="activeTab === 'tasks'"><TasksView /></div>
 
       <!-- ========== ALERTS CENTER (v1.2) ========== -->
-      <div v-if="activeTab === 'alerts'" class="alerts-page">
-        <div class="alerts-layout">
+      <div v-if="activeTab === 'alerts'" class="alerts-page"> class="alerts-page">
+        <!-- v1.4 Sub Tab Bar -->
+        <div class="alert-sub-tabs">
+          <div class="sub-tab" :class="{ active: alertSubTab === 'live' }" @click="alertSubTab = 'live'">实时</div>
+          <div class="sub-tab" :class="{ active: alertSubTab === 'history' }" @click="switchToHistory">
+            <span>历史</span>
+            <span class="sub-tab-badge" v-if="alertHistoryTotal > 0">{{ alertHistoryTotal }}</span>
+          </div>
+          <div class="sub-tab-right">
+            <el-button size="small" text @click="fetchAlertHistory" :loading="alertHistoryLoading">🔄 刷新</el-button>
+          </div>
+        </div>
+
+        <!-- Real-time Alerts -->
+        <div v-if="alertSubTab === 'live'" class="alerts-layout">
           <!-- Left: Alert List -->
           <div class="alerts-list-panel">
             <div class="section-title">🔔 告警列表 <span class="section-sub">({{ activeAlerts.length }} 条活跃)</span></div>
@@ -479,6 +434,7 @@
             </div>
           </div>
 
+          
           <!-- Right: Config Panel -->
           <div class="alerts-config-panel">
             <!-- Context Pressure Threshold -->
@@ -579,10 +535,102 @@
         </div>
       </div>
 
+      
+        </div>
+
+        <!-- v1.4 History Sub-Tab -->
+        <div v-if="alertSubTab === 'history'" class="alert-history-wrap">
+          <!-- Filter Bar -->
+          <div class="hist-filter-bar">
+            <el-select v-model="alertHistFilter.agent_id" size="small" placeholder="全部 Agent" clearable style="width:140px" @change="fetchAlertHistory">
+              <el-option v-for="a in agents" :key="a.id" :label="a.name + ' (' + a.id + ')'" :value="a.id" />
+            </el-select>
+            <el-select v-model="alertHistFilter.level" size="small" placeholder="全部级别" clearable style="width:120px" @change="fetchAlertHistory">
+              <el-option label="Critical" value="critical" />
+              <el-option label="Warning" value="warning" />
+              <el-option label="Info" value="info" />
+            </el-select>
+            <el-select v-model="alertHistFilter.timeRange" size="small" style="width:130px" @change="fetchAlertHistory">
+              <el-option label="近1小时" value="1h" />
+              <el-option label="近6小时" value="6h" />
+              <el-option label="近24小时" value="24h" />
+              <el-option label="近7天" value="7d" />
+              <el-option label="近30天" value="30d" />
+            </el-select>
+            <el-button size="small" @click="exportAlertHistoryCsv" :disabled="alertHistoryItems.length === 0">📥 导出 CSV</el-button>
+          </div>
+
+          <!-- Summary Stats -->
+          <div class="hist-summary">
+            <span class="hist-total">共 <strong>{{ alertHistoryTotal }}</strong> 条记录</span>
+            <span class="hist-badge critical" v-if="alertHistorySummary.critical > 0">🔴 Critical {{ alertHistorySummary.critical }}</span>
+            <span class="hist-badge warning" v-if="alertHistorySummary.warning > 0">🟡 Warning {{ alertHistorySummary.warning }}</span>
+            <span class="hist-badge info" v-if="alertHistorySummary.info > 0">🔵 Info {{ alertHistorySummary.info }}</span>
+          </div>
+
+          <!-- History List -->
+          <div v-if="alertHistoryLoading" class="hist-loading">
+            <div v-for="i in 3" :key="i" class="hist-skeleton pulse"></div>
+          </div>
+          <div v-else-if="alertHistoryItems.length === 0" class="hist-empty">
+            <div class="hist-empty-icon">📭</div>
+            <div class="hist-empty-text">暂无告警记录</div>
+          </div>
+          <div v-else class="hist-list">
+            <div
+              v-for="item in alertHistoryItems"
+              :key="item.id"
+              class="hist-card"
+              :class="'hist-level-' + item.level"
+            >
+              <div class="hist-card-icon">{{ item.level === 'critical' ? '🔴' : item.level === 'warning' ? '🟡' : '🔵' }}</div>
+              <div class="hist-card-body">
+                <div class="hist-card-header">
+                  <span class="hist-level-badge" :class="'badge-' + item.level">{{ item.level.toUpperCase() }}</span>
+                  <span class="hist-agent">Agent: {{ item.agent_id }}</span>
+                  <span class="hist-title">{{ item.title }}</span>
+                  <span class="hist-time">{{ formatAlertTime(item.trigger_time) }}</span>
+                </div>
+                <div class="hist-card-meta">
+                  <span class="hist-duration" v-if="item.duration_minutes">⏱ {{ item.duration_minutes }} 分钟</span>
+                  <span class="hist-status" :class="'status-' + item.status">
+                    {{ item.status === 'recovered' ? '已恢复' : item.status === 'escalated' ? '已升级' : '进行中' }}
+                  </span>
+                </div>
+                <!-- Expandable Detail -->
+                <div class="hist-detail" v-if="expandedAlertId === item.id">
+                  <div class="detail-row" v-if="item.threshold"><span class="dr-key">触发条件</span><span class="dr-val">{{ item.threshold }}</span></div>
+                  <div class="detail-row" v-if="item.current_value"><span class="dr-key">当前值</span><span class="dr-val">{{ item.current_value }}</span></div>
+                  <div class="detail-row"><span class="dr-key">处理建议</span><pre class="dr-val suggestion">{{ item.suggestion }}</pre></div>
+                </div>
+              </div>
+              <div class="hist-card-actions">
+                <el-button size="small" text @click="toggleAlertDetail(item.id)">{{ expandedAlertId === item.id ? '收起' : '详情' }}</el-button>
+                <el-button size="small" text type="success" @click="markAlertRecovered(item.id)" v-if="item.status !== 'recovered'">✓ 标记已恢复</el-button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Pagination -->
+          <div class="hist-pagination" v-if="alertHistoryTotal > 0">
+            <el-pagination
+              v-model:current-page="alertHistoryPage"
+              :page-size="20"
+              :total="alertHistoryTotal"
+              layout="prev, pager, next, jumper"
+              @current-change="onAlertHistoryPageChange"
+              background
+            />
+            <span class="hist-page-info">共 {{ alertHistoryTotal }} 条</span>
+          </div>
+        </div>
+      </div>
+
       <!-- ========== HALL (v1.4 Phase 1) ========== -->
       <HallView v-if="activeTab === 'hall'" />
 
-    </div>
+      <!-- ========== SETTINGS (v1.5) ========== -->
+      <SettingsView v-if="activeTab === 'settings'" />
 
     <!-- Agent Detail Modal -->
     <el-dialog v-model="detailVisible" :title="selectedAgent?.emoji + ' ' + selectedAgent?.name + ' - 详情'" width="800px">
@@ -785,13 +833,15 @@
         </el-button>
       </template>
     </el-dialog>
-  </div>
 </template>
 
 <script setup>
 import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
 import { ElMessage } from 'element-plus'
 import HallView from './components/HallView.vue'
+import UsageView from './components/UsageView.vue'
+import TasksView from './components/TasksView.vue'
+import SettingsView from './components/SettingsView.vue'
 
 const activeTab = ref('overview')
 const loading = ref(false)
@@ -831,6 +881,16 @@ const alertConfig = ref({
 })
 const historyExpanded = ref(false)
 const allAlerts = ref([])
+
+// v1.4 Alert History sub-tab
+const alertSubTab = ref('live')
+const alertHistoryPage = ref(1)
+const alertHistoryTotal = ref(0)
+const alertHistoryItems = ref([])
+const alertHistoryLoading = ref(false)
+const alertHistorySummary = ref({ critical: 0, warning: 0, info: 0 })
+const alertHistFilter = ref({ agent_id: '', level: '', timeRange: '24h' })
+const expandedAlertId = ref(null)
 
 // Team management
 const agentFormVisible = ref(false)
@@ -1319,6 +1379,86 @@ async function saveAlertConfig() {
   ElMessage.success('告警配置已保存')
 }
 
+// ===== v1.4 Alert History =====
+function timeRangeToIso(range) {
+  const now = Date.now()
+  const map = { '1h': 3600000, '6h': 21600000, '24h': 86400000, '7d': 604800000, '30d': 2592000000 }
+  const ms = map[range] || 86400000
+  return { start_time: new Date(now - ms).toISOString(), end_time: new Date(now).toISOString() }
+}
+
+async function fetchAlertHistory() {
+  alertHistoryLoading.value = true
+  try {
+    const { start_time, end_time } = timeRangeToIso(alertHistFilter.value.timeRange)
+    const params = new URLSearchParams({
+      page: alertHistoryPage.value,
+      page_size: 20,
+    })
+    if (alertHistFilter.value.agent_id) params.set('agent_id', alertHistFilter.value.agent_id)
+    if (alertHistFilter.value.level) params.set('level', alertHistFilter.value.level)
+    params.set('start_time', start_time)
+    params.set('end_time', end_time)
+    const res = await fetch('/api/alerts/history?' + params.toString())
+    const data = await res.json()
+    alertHistoryItems.value = data.items || []
+    alertHistoryTotal.value = data.total || 0
+    alertHistorySummary.value = data.summary || { critical: 0, warning: 0, info: 0 }
+  } catch (e) {
+    alertHistoryItems.value = []
+  }
+  alertHistoryLoading.value = false
+}
+
+function switchToHistory() {
+  alertSubTab.value = 'history'
+  if (alertHistoryItems.value.length === 0) fetchAlertHistory()
+}
+
+function onAlertHistoryPageChange(page) {
+  alertHistoryPage.value = page
+  fetchAlertHistory()
+}
+
+function formatAlertTime(isoStr) {
+  if (!isoStr) return '—'
+  const d = new Date(isoStr)
+  const now = Date.now()
+  const diff = now - d.getTime()
+  if (diff < 60000) return '刚刚'
+  if (diff < 3600000) return Math.floor(diff / 60000) + ' 分钟前'
+  if (diff < 86400000) return Math.floor(diff / 3600000) + ' 小时前'
+  return d.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+}
+
+function toggleAlertDetail(id) {
+  expandedAlertId.value = expandedAlertId.value === id ? null : id
+}
+
+function markAlertRecovered(id) {
+  const item = alertHistoryItems.value.find(i => i.id === id)
+  if (item) {
+    item.status = 'recovered'
+    item.recover_time = new Date().toISOString()
+    ElMessage.success('告警已标记为恢复')
+  }
+}
+
+function exportAlertHistoryCsv() {
+  const rows = [['ID', 'Agent', 'Level', 'Title', 'Trigger Time', 'Recover Time', 'Duration (min)', 'Status']]
+  for (const item of alertHistoryItems.value) {
+    rows.push([item.id, item.agent_id, item.level, item.title, item.trigger_time, item.recover_time || '', item.duration_minutes, item.status])
+  }
+  const csv = rows.map(r => r.join(',')).join('\n')
+  const blob = new Blob(['\ufeff' + csv], { type: 'text/csv;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = 'alert-history.csv'
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
 // ===== Team Management =====
 function openAddAgent() {
   agentFormMode.value = 'add'
@@ -1761,6 +1901,9 @@ body { background: #0D1117; }
 .agent-tags { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
 .agent-duty { font-size: 12px; color: #6E7681; line-height: 1.5; padding-top: 8px; border-top: 1px solid #21262D; }
 
+/* ========== USAGE (v1.4) ========== */
+.usage-tab { flex: 1; overflow: hidden; display: flex; flex-direction: column; }
+
 /* ========== TASKS ========== */
 .kanban-board { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
 .kanban-col { background: #161B22; border: 1px solid #30363D; border-radius: 12px; overflow: hidden; }
@@ -1868,6 +2011,142 @@ body { background: #0D1117; }
   align-items: flex-start;
 }
 .alerts-list-panel { flex: 1; min-width: 0; }
+/* v1.4 Alert Sub-Tabs */
+.alert-sub-tabs {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  padding: 12px 0 0 0;
+  border-bottom: 1px solid #21262d;
+  margin-bottom: 16px;
+}
+.sub-tab {
+  padding: 6px 16px;
+  font-size: 13px;
+  color: #8b949e;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  transition: color 0.2s, border-color 0.2s;
+  user-select: none;
+}
+.sub-tab:hover { color: #e6edf3; }
+.sub-tab.active { color: #6366f1; border-bottom-color: #6366f1; font-weight: 600; }
+.sub-tab-badge {
+  background: #f87171;
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  padding: 1px 5px;
+  border-radius: 10px;
+  min-width: 16px;
+  text-align: center;
+}
+.sub-tab-right { margin-left: auto; }
+
+/* v1.4 History */
+.alert-history-wrap { display: flex; flex-direction: column; gap: 0; }
+
+.hist-filter-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 0;
+  flex-wrap: wrap;
+}
+
+.hist-summary {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 0 12px;
+  font-size: 13px;
+  color: #8b949e;
+}
+.hist-total strong { color: #e6edf3; }
+.hist-badge { font-size: 12px; padding: 2px 8px; border-radius: 4px; }
+.hist-badge.critical { color: #f87171; background: rgba(248,81,73,0.12); }
+.hist-badge.warning { color: #fbbf24; background: rgba(251,191,36,0.12); }
+.hist-badge.info { color: #60a5fa; background: rgba(96,165,250,0.12); }
+
+.hist-loading { display: flex; flex-direction: column; gap: 8px; }
+.hist-skeleton { height: 80px; background: #1a1a2e; border-radius: 10px; }
+@keyframes pulse { 0%,100%{opacity:.5} 50%{opacity:1} }
+.pulse { animation: pulse 1.5s infinite; }
+
+.hist-empty {
+  text-align: center;
+  padding: 48px 0;
+  color: #484f58;
+}
+.hist-empty-icon { font-size: 48px; margin-bottom: 12px; }
+.hist-empty-text { font-size: 14px; color: #8b949e; }
+
+.hist-list { display: flex; flex-direction: column; gap: 8px; margin-bottom: 16px; }
+.hist-card {
+  background: #1a1a2e;
+  border: 1px solid #2d2d45;
+  border-radius: 10px;
+  border-left-width: 3px;
+  padding: 12px 16px;
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  transition: background 0.15s;
+}
+.hist-card:hover { background: #252538; }
+.hist-level-critical { border-left-color: #f87171; }
+.hist-level-warning { border-left-color: #fbbf24; }
+.hist-level-info { border-left-color: #60a5fa; }
+
+.hist-card-icon { font-size: 18px; flex-shrink: 0; padding-top: 2px; }
+.hist-card-body { flex: 1; min-width: 0; }
+.hist-card-header { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 4px; }
+.hist-level-badge {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 4px;
+  letter-spacing: 0.5px;
+}
+.badge-critical { color: #f87171; background: rgba(248,81,73,0.15); }
+.badge-warning { color: #fbbf24; background: rgba(251,191,36,0.15); }
+.badge-info { color: #60a5fa; background: rgba(96,165,250,0.15); }
+.hist-agent { font-size: 12px; color: #818cf8; font-family: monospace; }
+.hist-title { font-size: 13px; color: #e6edf3; font-weight: 500; flex: 1; }
+.hist-time { font-size: 11px; color: #484f58; margin-left: auto; }
+.hist-card-meta { display: flex; align-items: center; gap: 12px; }
+.hist-duration, .hist-status { font-size: 11px; color: #484f58; }
+.status-recovered { color: #34d399; }
+.status-ongoing { color: #fbbf24; }
+.status-escalated { color: #f87171; }
+
+.hist-detail {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid #2d2d45;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.detail-row { display: flex; gap: 8px; font-size: 12px; }
+.dr-key { color: #484f58; min-width: 70px; }
+.dr-val { color: #8b949e; }
+.dr-val.suggestion { white-space: pre-wrap; color: #e6edf3; }
+
+.hist-card-actions { display: flex; flex-direction: column; gap: 4px; flex-shrink: 0; }
+
+.hist-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 12px 0;
+}
+.hist-page-info { font-size: 12px; color: #484f58; }
+
 .alerts-config-panel { width: 320px; flex-shrink: 0; }
 
 .alert-stats-row {
